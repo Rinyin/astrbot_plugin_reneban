@@ -2,7 +2,7 @@
 
 # ReNeBan
 
-_🚫 为 [astrbot](https://github.com/AstrBotDevs/AstrBot) 设计的简易黑名单插件 🚫_
+_🚫 为 [astrbot](https://github.com/AstrBotDevs/AstrBot) 设计的黑名单插件 🚫_
 
 [![License](https://img.shields.io/badge/License-MIT-brightgreen.svg)](https://opensource.org/licenses/MIT)
 <br>
@@ -16,6 +16,29 @@ _🚫 为 [astrbot](https://github.com/AstrBotDevs/AstrBot) 设计的简易黑�
 ReNeBan 是一个为 [astrbot](https://github.com/AstrBotDevs/AstrBot) 设计的简易黑名单插件，允许bot管理员在**会话**或**全局**范围较为灵活地禁用指定用户。
 ReNeBan 允许为**禁用/解禁**设置**时限**和**理由**，并自动整理记录。
 ReNeBan 的指令优先级策略为：`局部优先`，`pass > ban`。
+
+插件版本 1.3.0 起支持 LLM 自动执行全局拉黑。LLM 工具要求每次调用提供具体理由，成功后不会把被拉黑用户、时长或理由写入当前对话；管理员审计通知会通过配置的私聊 UMO 发送。插件同时提供 Dashboard 页面，可查看当前用户黑名单并修改启用状态、LLM 开关、缓存时间和管理员 UMO。
+
+## LLM 工具
+
+工具名：`reneban_ban_user`
+
+参数：
+
+- `user_id`：平台用户 ID，不带 `@`。
+- `duration`：`30m`、`2h`、`7d` 等时长，或 `permanent`/`永久` 表示永久拉黑。
+- `reason`：必填的具体理由；`无理由`、`None` 和 `NULL` 会被拒绝。
+
+LLM 拉黑使用全局黑名单。成功后会向配置的管理员私聊 UMO 发送用户、时长、理由、来源会话和时间。
+
+## Dashboard
+
+在 WebUI 的插件详情页打开 ReNeBan 的 Dashboard 页面。页面显示全局和会话黑名单中的用户、范围、到期时间、剩余时长与理由，并可保存以下配置：
+
+- 是否启用黑名单功能
+- 是否允许 LLM 自动拉黑
+- 缓存存活时间
+- 管理员私聊 UMO，格式为 `platform:FriendMessage:user_id`，例如 `aiocqhttp:FriendMessage:123456`
 
 ## 命令
 | 命令 | 语法 | 说明 | 示例 |

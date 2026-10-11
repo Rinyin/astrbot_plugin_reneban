@@ -8,5 +8,16 @@
         "description": "缓存存活时间（秒）",
         "type": "int",
         "default": 60
+    },
+    "llm_ban_enabled": {
+        "description": "是否允许 LLM 自动拉黑用户",
+        "type": "bool",
+        "default": true
+    },
+    "admin_umo": {
+        "description": "接收 LLM 拉黑通知的管理员私聊 UMO（platform:FriendMessage:user_id）",
+        "type": "string",
+        "default": "",
+        "hint": "例如 aiocqhttp:FriendMessage:123456"
     }
 }

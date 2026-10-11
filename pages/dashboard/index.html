@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ReNeBan Dashboard</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main class="layout">
+      <header class="page-header">
+        <div>
+          <p class="eyebrow">ReNeBan</p>
+          <h1>黑名单管理</h1>
+          <p class="subtitle">查看有效记录并管理自动拉黑通知。</p>
+        </div>
+        <button class="icon-button" id="refresh" type="button" title="刷新数据" aria-label="刷新数据">↻</button>
+      </header>
+
+      <section class="settings" aria-labelledby="settings-title">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">设置</p>
+            <h2 id="settings-title">插件配置</h2>
+          </div>
+          <span class="status" id="save-status" role="status"></span>
+        </div>
+        <div class="setting-grid">
+          <label class="switch-row">
+            <span>
+              <strong>启用黑名单</strong>
+              <small>拦截已拉黑用户的消息</small>
+            </span>
+            <input id="enabled" type="checkbox" />
+          </label>
+          <label class="switch-row">
+            <span>
+              <strong>允许 LLM 自动拉黑</strong>
+              <small>要求每次工具调用提供理由</small>
+            </span>
+            <input id="llm-ban-enabled" type="checkbox" />
+          </label>
+          <label class="field">
+            <span>缓存时间（秒）</span>
+            <input id="cache-ttl" type="number" min="1" step="1" />
+          </label>
+          <label class="field field-wide">
+            <span>管理员私聊 UMO</span>
+            <input id="admin-umo" type="text" placeholder="aiocqhttp:FriendMessage:123456" autocomplete="off" />
+          </label>
+        </div>
+        <div class="actions">
+          <button class="primary-button" id="save" type="button">保存配置</button>
+        </div>
+      </section>
+
+      <section class="records" aria-labelledby="records-title">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">实时数据</p>
+            <h2 id="records-title">已拉黑用户</h2>
+          </div>
+          <span class="count" id="record-count">0</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>用户</th>
+                <th>范围</th>
+                <th>到期时间</th>
+                <th>剩余</th>
+                <th>原因</th>
+              </tr>
+            </thead>
+            <tbody id="records-body">
+              <tr><td class="empty" colspan="5">正在加载…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+    <script src="/api/plugin/page/bridge-sdk.js"></script>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

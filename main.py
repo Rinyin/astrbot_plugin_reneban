@@ -1,36 +1,300 @@
 from astrbot.api.event import filter, AstrMessageEvent
+from astrbot.api.event import MessageChain
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.api import logger, AstrBotConfig
+from astrbot.api.web import error_response, json_response, request
+from datetime import datetime
 import time as time_module
 
 from . import strings, time_utils
 from .datafile_manager import DatafileManager
 from .user_manager import (
     BaseModelList,
-    BaseDataModel,
     UserDataList,
     UserDataModel,
     UmoDataModel,
     UmoDataList,
-    ModelListRegistry,
     MODEL_LIST_REGISTRY,
 )
 from .event_utils import EventUtils
-from .exceptions import *
+from .exceptions import AtUserCountError, PermanentRecordTimeError, TimestrValueError
+
+
+PLUGIN_NAME = "astrbot_plugin_reneban"
+_PERMANENT_DURATION_VALUES = {
+    "0",
+    "0s",
+    "permanent",
+    "forever",
+    "infinite",
+    "永远",
+    "永久",
+    "无期限",
+}
+
+
+def _parse_llm_duration(duration: str | int | float) -> int:
+    """Parse the duration accepted by the LLM tool into seconds."""
+    value = str(duration).strip()
+    if value.lower() in _PERMANENT_DURATION_VALUES:
+        return 0
+    return time_utils.timestr_to_int(value)
+
+
+def _duration_label(seconds: int) -> str:
+    """Format a duration without the remaining-time prefix used by banlist."""
+    if seconds == 0:
+        return "永久"
+    return time_utils.time_format(str(seconds))
 
 
 class ReNeBan(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
+        self.config = config
         # 从插件配置中获取是否启用禁用功能，默认为启用
-        self.enable = config.get("enable", True)
+        self.enable = bool(config.get("enable", True))
+        self.llm_ban_enabled = bool(config.get("llm_ban_enabled", True))
+        try:
+            self.admin_umo = self._normalize_admin_umo(config.get("admin_umo", ""))
+        except ValueError as exc:
+            self.admin_umo = ""
+            logger.warning("管理员私聊 UMO 配置无效：%s", exc)
         # 从插件配置中获取缓存存活时间，默认为60秒
-        cache_ttl = config.get("cache_ttl", 60)
+        try:
+            cache_ttl = max(1, int(config.get("cache_ttl", 60)))
+        except (TypeError, ValueError):
+            cache_ttl = 60
         MODEL_LIST_REGISTRY.start()
         # 初始化数据文件管理器
         self.data_manager = DatafileManager(
             StarTools.get_data_dir(), cache_ttl=cache_ttl
         )
+        context.register_web_api(
+            f"/{PLUGIN_NAME}/dashboard/data",
+            self.dashboard_data,
+            ["GET"],
+            "ReNeBan dashboard data",
+        )
+        context.register_web_api(
+            f"/{PLUGIN_NAME}/dashboard/config",
+            self.dashboard_config,
+            ["POST"],
+            "Save ReNeBan dashboard configuration",
+        )
+
+    @staticmethod
+    def _normalize_admin_umo(value: object) -> str:
+        """Normalize a configured administrator session to a private-message UMO."""
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        if raw.count(":") == 1:
+            platform_id, user_id = raw.split(":", 1)
+            raw = f"{platform_id}:FriendMessage:{user_id}"
+        parts = raw.split(":", 2)
+        if len(parts) != 3 or not all(parts):
+            raise ValueError("管理员 UMO 必须是 platform:FriendMessage:user_id 格式")
+        if parts[1] != "FriendMessage":
+            raise ValueError("管理员 UMO 的消息类型必须是 FriendMessage")
+        return raw
+
+    async def _notify_admin(
+        self,
+        event: AstrMessageEvent,
+        user_id: str,
+        duration: int,
+        reason: str,
+    ) -> None:
+        """Send the LLM ban audit entry to the configured administrator."""
+        if not self.admin_umo:
+            logger.warning("LLM 拉黑已执行，但未配置管理员私聊 UMO")
+            return
+
+        notification = (
+            "ReNeBan LLM 拉黑通知\n"
+            f"用户：{user_id}\n"
+            f"时长：{_duration_label(duration)}\n"
+            f"原因：{reason}\n"
+            f"来源会话：{event.unified_msg_origin}\n"
+            f"时间：{datetime.now().astimezone().strftime('%Y-%m-%d %H:%M:%S %z')}"
+        )
+        try:
+            sent = await self.context.send_message(
+                self.admin_umo,
+                MessageChain().message(notification),
+            )
+            if not sent:
+                logger.warning("管理员私聊通知未找到匹配的平台")
+        except Exception:
+            logger.exception("发送管理员私聊通知失败")
+
+    def _dashboard_bans(self) -> list[dict[str, object]]:
+        """Return active user bans in a JSON-friendly shape for the dashboard."""
+        data = self.data_manager.get_data(["banall", "ban"])
+        now = int(time_module.time())
+        result: list[dict[str, object]] = []
+
+        for item in data["banall"]:
+            result.append(
+                {
+                    "uid": item.uid,
+                    "scope": "全局",
+                    "scope_id": "全局",
+                    "time": "永久"
+                    if item.time == 0
+                    else datetime.fromtimestamp(item.time)
+                    .astimezone()
+                    .strftime("%Y-%m-%d %H:%M:%S"),
+                    "remaining": time_utils.timelast_format(
+                        item.time - now if item.time != 0 else 0
+                    ),
+                    "reason": item.reason or strings.messages["no_reason"],
+                    "permanent": item.time == 0,
+                }
+            )
+
+        for umo, items in data["ban"].items():
+            for item in items:
+                result.append(
+                    {
+                        "uid": item.uid,
+                        "scope": "会话",
+                        "scope_id": umo,
+                        "time": "永久"
+                        if item.time == 0
+                        else datetime.fromtimestamp(item.time)
+                        .astimezone()
+                        .strftime("%Y-%m-%d %H:%M:%S"),
+                        "remaining": time_utils.timelast_format(
+                            item.time - now if item.time != 0 else 0
+                        ),
+                        "reason": item.reason or strings.messages["no_reason"],
+                        "permanent": item.time == 0,
+                    }
+                )
+
+        return sorted(result, key=lambda item: (str(item["uid"]), str(item["scope"])))
+
+    async def dashboard_data(self):
+        """Return active bans and current plugin configuration."""
+        return json_response(
+            {
+                "enabled": self.enable,
+                "llm_ban_enabled": self.llm_ban_enabled,
+                "cache_ttl": self.data_manager._cache_ttl,
+                "admin_umo": self.admin_umo,
+                "bans": self._dashboard_bans(),
+            }
+        )
+
+    async def dashboard_config(self):
+        """Persist configuration submitted by the plugin dashboard."""
+        payload = await request.json(default={})
+        if not isinstance(payload, dict):
+            return error_response("配置必须是 JSON 对象")
+
+        enabled = payload.get("enabled", self.enable)
+        llm_ban_enabled = payload.get("llm_ban_enabled", self.llm_ban_enabled)
+        cache_ttl = payload.get("cache_ttl", self.data_manager._cache_ttl)
+        if not isinstance(enabled, bool) or not isinstance(llm_ban_enabled, bool):
+            return error_response("enabled 和 llm_ban_enabled 必须是布尔值")
+        try:
+            cache_ttl = int(cache_ttl)
+        except (TypeError, ValueError):
+            return error_response("cache_ttl 必须是正整数")
+        if cache_ttl < 1:
+            return error_response("cache_ttl 必须是正整数")
+
+        try:
+            admin_umo = self._normalize_admin_umo(
+                payload.get("admin_umo", self.admin_umo)
+            )
+        except ValueError as exc:
+            return error_response(str(exc))
+
+        self.enable = enabled
+        self.llm_ban_enabled = llm_ban_enabled
+        self.admin_umo = admin_umo
+        self.data_manager._cache_ttl = cache_ttl
+        self.data_manager._cache_timestamp = 0
+        self.config["enable"] = enabled
+        self.config["llm_ban_enabled"] = llm_ban_enabled
+        self.config["cache_ttl"] = cache_ttl
+        self.config["admin_umo"] = admin_umo
+        try:
+            await self.config.save_config_async()
+        except Exception:
+            logger.exception("保存 ReNeBan 配置失败")
+            return error_response("保存配置失败", status_code=500)
+        return json_response(
+            {
+                "saved": True,
+                "enabled": self.enable,
+                "llm_ban_enabled": self.llm_ban_enabled,
+                "cache_ttl": cache_ttl,
+                "admin_umo": self.admin_umo,
+            }
+        )
+
+    @filter.llm_tool(name="reneban_ban_user")
+    async def llm_ban_user(
+        self,
+        event: AstrMessageEvent,
+        user_id: str,
+        duration: str,
+        reason: str,
+    ):
+        """Silently add a global user ban and notify the configured administrator.
+
+        Args:
+            user_id(string): The user ID to ban. Use the platform user ID, without an @ prefix.
+            duration(string): Ban duration such as 30m, 2h, 7d, or permanent.
+            reason(string): A concrete reason for the ban. This argument is required.
+        """
+        if not self.enable or not self.llm_ban_enabled:
+            return "error: ReNeBan is disabled"
+
+        uid = str(user_id or "").strip().lstrip("@")
+        ban_reason = strings.noreason_to_none(str(reason or "").strip())
+        if not uid:
+            return "error: user_id is required"
+        if not ban_reason:
+            return "error: a concrete reason is required"
+        if len(ban_reason) > 2000:
+            return "error: reason is too long"
+        try:
+            duration_seconds = _parse_llm_duration(duration)
+        except TimestrValueError:
+            return "error: invalid duration; use 30m, 2h, 7d, or permanent"
+
+        banall_list: UserDataList = self.data_manager.get_data("banall")
+        try:
+            if not banall_list.add_time_to_data(
+                uid,
+                duration_seconds,
+                ban_reason,
+            ):
+                banall_list.append(
+                    UserDataModel(
+                        uid=uid,
+                        time=(
+                            int(time_module.time()) + duration_seconds
+                            if duration_seconds != 0
+                            else 0
+                        ),
+                        reason=ban_reason,
+                    )
+                )
+            self.data_manager.write_data("banall", banall_list)
+        except PermanentRecordTimeError:
+            return "error: this user already has a permanent ban"
+
+        await self._notify_admin(event, uid, duration_seconds, ban_reason)
+        if uid == str(event.get_sender_id()):
+            event.stop_event()
+        # Do not expose the target, duration, or reason in the conversation.
+        return None
 
     @filter.command("banlist")
     async def banlist(self, event: AstrMessageEvent):
@@ -252,7 +516,7 @@ class ReNeBan(Star):
             # 若end存在，说明语法错误，发送错误信息并return
             yield event.plain_result(strings.command_error("ban"))
             return
-        if umo == None:
+        if umo is None:
             # 若umo不存在，则使用EventUtils.get_event_umo(self.context, event)（当前群）
             umo = EventUtils.get_event_umo(self.context, event)
         reason = strings.noreason_to_none(reason)
@@ -406,7 +670,7 @@ class ReNeBan(Star):
             # 若end存在，说明语法错误，发送错误信息并return
             yield event.plain_result(strings.command_error("pass"))
             return
-        if umo == None:
+        if umo is None:
             # 若umo不存在，则使用EventUtils.get_event_umo(self.context, event)（当前群）
             umo = EventUtils.get_event_umo(self.context, event)
         reason = strings.noreason_to_none(reason)
@@ -559,7 +823,7 @@ class ReNeBan(Star):
             # 若end存在，说明语法错误，发送错误信息并return
             yield event.plain_result(strings.command_error("dec-pass"))
             return
-        if umo == None:
+        if umo is None:
             # 若umo不存在，则使用EventUtils.get_event_umo(self.context, event)（当前群）
             umo = EventUtils.get_event_umo(self.context, event)
         reason = strings.noreason_to_none(reason)
@@ -689,7 +953,7 @@ class ReNeBan(Star):
             # 若end存在，说明语法错误，发送错误信息并return
             yield event.plain_result(strings.command_error("dec-ban"))
             return
-        if umo == None:
+        if umo is None:
             # 若umo不存在，则使用EventUtils.get_event_umo(self.context, event)（当前群）
             umo = EventUtils.get_event_umo(self.context, event)
         reason = strings.noreason_to_none(reason)
